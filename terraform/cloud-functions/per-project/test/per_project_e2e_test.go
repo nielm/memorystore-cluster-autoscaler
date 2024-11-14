@@ -163,7 +163,6 @@ func TestPerProjectEndToEndDeployment(t *testing.T) {
 		logger.Log(t, "TEST STAGE: TEARDOWN")
 		logger.Log(t, "----------------------------------------------------------")
 		terraformOptions := test_structure.LoadTerraformOptions(t, terraformDir)
-		terraformOptions.Logger = logger.Discard
 		terraform.Destroy(t, terraformOptions)
 		logger.Log(t, "----------------------------------------------------------")
 		logger.Log(t, "TEST STAGE: TEARDOWN COMPLETED")
