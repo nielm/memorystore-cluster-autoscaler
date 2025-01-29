@@ -25,6 +25,8 @@ const {
   createStateData,
 } = require('./test-utils.js');
 const {afterEach} = require('mocha');
+const protobufjs = require('protobufjs');
+const {protos: RedisClusterProtos} = require('@google-cloud/redis-cluster');
 
 /**
  * @typedef {import('../../../autoscaler-common/types')
@@ -383,33 +385,71 @@ describe('#readStateCheckOngoingLRO', () => {
   let clusterParams;
   /** @type {sinon.SinonStubbedInstance<State>} */
   let stateStub;
-  /** @type {*} */
-  let operation;
 
   const getOperation = sinon.stub();
-  const fakeRedisAPI = {
-    projects: {
-      locations: {
-        operations: {
-          get: getOperation,
-        },
-      },
-    },
-  };
+  const fakeMemorystoreClusterClient = {getOperation};
+
   const countersStub = {
     incScalingSuccessCounter: sinon.stub(),
     incScalingFailedCounter: sinon.stub(),
     incScalingDeniedCounter: sinon.stub(),
     recordScalingDuration: sinon.stub(),
   };
-  app.__set__('redisApi', fakeRedisAPI);
 
   const lastScalingDate = new Date('2024-01-01T12:00:00Z');
+
+  /**
+   *
+   * @param {boolean?} done
+   * @param {RedisClusterProtos.google.rpc.IStatus?} error
+   * @param {number?} createTimeMillis
+   * @param {number?} endTimeMillis
+   * @return {RedisClusterProtos.google.longrunning.Operation}
+   */
+  function buildGetOperationResponse(
+    done,
+    error,
+    createTimeMillis,
+    endTimeMillis,
+  ) {
+    const metadataBuffer = protobufjs.Writer.create();
+    RedisClusterProtos.google.cloud.redis.cluster.v1.OperationMetadata.encode(
+      {
+        endTime:
+          endTimeMillis == null
+            ? null
+            : {
+                seconds: endTimeMillis / 1000,
+                nanos: (endTimeMillis % 1000) * 1_000_000,
+              },
+        createTime:
+          createTimeMillis == null
+            ? null
+            : {
+                seconds: createTimeMillis / 1000,
+                nanos: (createTimeMillis % 1000) * 1_000_000,
+              },
+      },
+      metadataBuffer,
+    );
+    const metadataBufferBytes = metadataBuffer.finish();
+
+    return new RedisClusterProtos.google.longrunning.Operation({
+      done,
+      error,
+      metadata: {
+        type_url:
+          RedisClusterProtos.google.cloud.redis.cluster.v1.OperationMetadata.getTypeUrl(),
+        value: metadataBufferBytes,
+      },
+    });
+  }
 
   beforeEach(() => {
     clusterParams = createClusterParameters();
     stateStub = createStubState();
     app.__set__('Counters', countersStub);
+    app.__set__('memorystoreClusterClient', fakeMemorystoreClusterClient);
 
     // A State with an ongoing operation
     autoscalerState = {
@@ -423,17 +463,6 @@ describe('#readStateCheckOngoingLRO', () => {
       scalingMethod: 'STEPWISE',
     };
     originalAutoscalerState = {...autoscalerState};
-
-    operation = {
-      done: null,
-      error: null,
-      metadata: {
-        '@type':
-          'type.googleapis.com/google.cloud.redis.cluster.v1.OperationMetadata',
-        'endTime': null,
-        'createTime': lastScalingDate.toISOString(),
-      },
-    };
   });
 
   afterEach(() => {
@@ -493,7 +522,7 @@ describe('#readStateCheckOngoingLRO', () => {
 
   it('should clear the operation if operation.get returns null', async () => {
     stateStub.get.resolves(autoscalerState);
-    getOperation.resolves({data: null});
+    getOperation.resolves([null]);
 
     const expectedState = {
       ...originalAutoscalerState,
@@ -518,11 +547,14 @@ describe('#readStateCheckOngoingLRO', () => {
 
   it('should clear lastScaling, requestedSize if op failed with error', async () => {
     stateStub.get.resolves(autoscalerState);
-    operation.done = true;
-    operation.error = {message: 'Scaling op failed'};
-    operation.metadata.endTime = // 60 seconds after start
-      new Date(lastScalingDate.getTime() + 60_000).toISOString();
-    getOperation.resolves({data: operation});
+
+    const operation = buildGetOperationResponse(
+      true,
+      {code: 500, message: 'Scaling op failed'},
+      lastScalingDate.getTime(),
+      lastScalingDate.getTime() + 60_000,
+    );
+    getOperation.resolves([operation]);
 
     const expectedState = {
       ...originalAutoscalerState,
@@ -547,8 +579,9 @@ describe('#readStateCheckOngoingLRO', () => {
 
   it('should clear the operation if no metadata', async () => {
     stateStub.get.resolves(autoscalerState);
+    const operation = buildGetOperationResponse(true, null, null, null);
     operation.metadata = null;
-    getOperation.resolves({data: operation});
+    getOperation.resolves([operation]);
 
     const expectedState = {
       ...originalAutoscalerState,
@@ -572,8 +605,13 @@ describe('#readStateCheckOngoingLRO', () => {
 
   it('should leave state unchanged if op not done yet', async () => {
     stateStub.get.resolves(autoscalerState);
-    operation.done = false;
-    getOperation.resolves({data: operation});
+    const operation = buildGetOperationResponse(
+      false,
+      null,
+      lastScalingDate.getTime(),
+      null,
+    );
+    getOperation.resolves([operation]);
 
     assert.equals(
       await readStateCheckOngoingLRO(clusterParams, stateStub),
@@ -595,11 +633,14 @@ describe('#readStateCheckOngoingLRO', () => {
       scalingPreviousSize: 10,
       scalingMethod: 'DIRECT',
     });
-    // 60 seconds after start
-    const endTime = lastScalingDate.getTime() + 60_000;
-    operation.done = true;
-    operation.metadata.endTime = new Date(endTime).toISOString();
-    getOperation.resolves({data: operation});
+    const operation = buildGetOperationResponse(
+      true,
+      null,
+      lastScalingDate.getTime(),
+      lastScalingDate.getTime() + 60_000,
+    );
+
+    getOperation.resolves([operation]);
 
     const expectedState = {
       ...originalAutoscalerState,
@@ -607,7 +648,7 @@ describe('#readStateCheckOngoingLRO', () => {
       scalingRequestedSize: null,
       scalingPreviousSize: null,
       scalingMethod: null,
-      lastScalingCompleteTimestamp: endTime,
+      lastScalingCompleteTimestamp: lastScalingDate.getTime() + 60_000,
     };
     assert.equals(
       await readStateCheckOngoingLRO(clusterParams, stateStub),

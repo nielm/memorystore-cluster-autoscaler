@@ -49,7 +49,6 @@
     "axios": "^1.7.9",
     "eventid": "^2.0.1",
     "express": "^4.21.2",
-    "googleapis": "^144.0.0",
     "js-yaml": "^4.1.0",
     "json-rules-engine": "^7.3.0",
     "lodash": "^4.17.21",
