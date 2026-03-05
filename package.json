@@ -84,6 +84,8 @@
   "overrides": {
     "diff": ">=8.0.3",
     "minimatch": ">=10.2.4",
-    "glob": ">=13.0.6"
+    "glob": ">=13.0.6",
+    "serialize-javascript": ">=7.0.4",
+    "@tootallnate/once": ">=3.0.1"
   }
 }
